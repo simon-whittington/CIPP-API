@@ -86,7 +86,11 @@ function New-CIPPGraphSubscription {
             # Required event types
             $EventList = [System.Collections.Generic.List[string]]@('test-created', 'granular-admin-relationship-approved')
             if (($EventType | Measure-Object).count -gt 0) {
-                $EventList.AddRange($EventType)
+                foreach ($Event in $EventType) {
+                    if ($EventList -notcontains $Event) {
+                        $EventList.Add($Event)
+                    }
+                }
             }
 
             $Body = [PSCustomObject]@{
@@ -94,12 +98,28 @@ function New-CIPPGraphSubscription {
                 WebhookEvents = @($EventList)
             }
             try {
+                $EventCompare = Compare-Object $EventList ($MatchedWebhook.EventType | ConvertFrom-Json)
+            } catch {
+                $EventCompare = $false
+            }
+            try {
                 $Uri = 'https://api.partnercenter.microsoft.com/webhooks/v1/registration'
-                $Subscription = New-GraphGetRequest -uri $Uri -tenantid $env:TenantID -NoAuthCheck $true -scope 'https://api.partnercenter.microsoft.com/.default'
-                if ($Subscription.WebhookUrl -ne $MatchedWebhook.WebhookNotificationUrl) {
+                try {
+                    $Existing = New-GraphGetRequest -NoAuthCheck $true -uri $Uri -tenantid $env:TenantId -scope 'https://api.partnercenter.microsoft.com/.default'
+                } catch { $Existing = $false }
+                if (!$Existing -or $Existing.webhookUrl -ne $MatchedWebhook.WebhookNotificationUrl -or $EventCompare) {
+                    if ($Existing.WebhookUrl) {
+                        $Action = 'Updated'
+                        $Method = 'PUT'
+                        Write-Host 'updating webhook'
+                    } else {
+                        $Action = 'Created'
+                        $Method = 'POST'
+                        Write-Host 'creating webhook'
+                    }
 
-                    if ($Subscription.WebhookUrl) { $Method = 'PUT' } else { $Method = 'POST' }
-                    $GraphRequest = New-GraphPOSTRequest -uri 'https://api.partnercenter.microsoft.com/webhooks/v1/registration' -type $Method -tenantid $env:TenantId -scope 'https://api.partnercenter.microsoft.com/.default' -body ($Body | ConvertTo-Json) -verbose
+                    $Uri = 'https://api.partnercenter.microsoft.com/webhooks/v1/registration'
+                    $GraphRequest = New-GraphPOSTRequest -uri $Uri -type $Method -tenantid $env:TenantId -scope 'https://api.partnercenter.microsoft.com/.default' -body ($Body | ConvertTo-Json) -NoAuthCheck $true
 
                     $WebhookRow = @{
                         PartitionKey           = [string]$CIPPID
@@ -110,16 +130,16 @@ function New-CIPPGraphSubscription {
                         Expiration             = 'Does Not Expire'
                         WebhookNotificationUrl = [string]$Body.WebhookUrl
                     }
-                    $null = Add-CIPPAzDataTableEntity @WebhookTable -Entity $WebhookRow
-                    Write-LogMessage -user $ExecutingUser -API $APIName -message 'Created Partner Center Webhook subscription' -Sev 'Info' -tenant 'PartnerTenant'
-                    return 'Created Partner Center Webhook subscription'
+                    $null = Add-CIPPAzDataTableEntity @WebhookTable -Entity $WebhookRow -Force
+                    Write-LogMessage -user $ExecutingUser -API $APIName -message "$Action Partner Center Webhook subscription" -Sev 'Info' -tenant 'PartnerTenant'
+                    return "$Action Partner Center Webhook subscription"
                 } else {
                     Write-LogMessage -user $ExecutingUser -API $APIName -message 'Existing Partner Center Webhook subscription found' -Sev 'Info' -tenant 'PartnerTenant'
                     return 'Existing Partner Center Webhook subscription found'
                 }
             } catch {
                 Write-LogMessage -user $ExecutingUser -API $APIName -message "Failed to create Partner Center Webhook Subscription: $($_.Exception.Message)" -Sev 'Error' -tenant 'PartnerTenant'
-                return "Failed to create Partner Center Webhook Subscription for $($TenantFilter): $($_.Exception.Message)"
+                return "Failed to create Partner Webhook Subscription: $($_.Exception.Message)"
             }
 
         } else {
