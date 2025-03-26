@@ -10,6 +10,7 @@ function Invoke-ExecCustomData {
 
     $Action = $Request.Query.Action ?? $Request.Body.Action
     $CustomDataTable = Get-CippTable -TableName 'CustomData'
+    $CustomDataMappingsTable = Get-CippTable -TableName 'CustomDataMappings'
 
     Write-Information "Executing action '$Action'"
 
@@ -231,6 +232,19 @@ function Invoke-ExecCustomData {
             try {
                 $Uri = "https://graph.microsoft.com/beta/applications(appId='$($env:ApplicationId)')/extensionProperties"
                 $DirectoryExtensions = New-GraphGetRequest -uri $Uri -AsApp $true -NoAuthCheck $true -tenantid $env:TenantID
+                $Existing = Get-CIPPAzDataTableEntity @CustomDataTable -Filter "PartitionKey eq 'DirectoryExtension'"
+
+                foreach ($DirectoryExtension in $DirectoryExtensions) {
+                    if ($Existing -match $DirectoryExtension.name) {
+                        continue
+                    }
+                    $Entity = @{
+                        PartitionKey = 'DirectoryExtension'
+                        RowKey       = $DirectoryExtension.name
+                        JSON         = [string](ConvertTo-Json $DirectoryExtension -Compress -Depth 5)
+                    }
+                    Add-CIPPAzDataTableEntity @CustomDataTable -Entity $Entity -Force
+                }
 
                 $Body = @{
                     Results = @($DirectoryExtensions)
@@ -281,8 +295,9 @@ function Invoke-ExecCustomData {
                 $Entity = @{
                     PartitionKey = 'DirectoryExtension'
                     RowKey       = $Response.name
-                    JSON         = [string](ConvertFrom-Json $Response -Compress -Depth 5)
+                    JSON         = [string](ConvertTo-Json $Response -Compress -Depth 5)
                 }
+                Add-CIPPAzDataTableEntity @CustomDataTable -Entity $Entity -Force
             } catch {
                 $Body = @{
                     Results = @(
@@ -341,6 +356,131 @@ function Invoke-ExecCustomData {
                 Results = @($AvailableAttributes)
             }
         }
+        'ListMappings' {
+            try {
+                $Mappings = Get-CIPPAzDataTableEntity @CustomDataMappingsTable | ForEach-Object {
+                    $Mapping = $_.JSON | ConvertFrom-Json -AsHashtable
+
+                    Write-Information ($Mapping | ConvertTo-Json -Depth 5)
+                    [PSCustomObject]@{
+                        id                  = $_.RowKey
+                        tenant              = $Mapping.tenantFilter.label
+                        dataset             = $Mapping.extensionSyncDataset.label
+                        sourceType          = $Mapping.sourceType.label
+                        directoryObject     = $Mapping.directoryObjectType.label
+                        syncProperty        = $Mapping.extensionSyncProperty.label ?? @($Mapping.extensionSyncDataset.addedFields.select -split ',')
+                        customDataAttribute = $Mapping.customDataAttribute.label
+                    }
+                }
+                $Body = @{
+                    Results = @($Mappings)
+                }
+            } catch {
+                $Body = @{
+                    Results = @(
+                        @{
+                            state      = 'error'
+                            resultText = "Failed to retrieve mappings: $($_.Exception.Message)"
+                        }
+                    )
+                }
+            }
+        }
+        'AddEditMapping' {
+            try {
+                $Mapping = $Request.Body.Mapping
+                if (!$Mapping) {
+                    throw 'Mapping data is missing in the request body.'
+                }
+                $MappingId = $Request.Body.id ?? [Guid]::NewGuid().ToString()
+                $Entity = @{
+                    PartitionKey = 'Mapping'
+                    RowKey       = [string]$MappingId
+                    JSON         = [string]($Mapping | ConvertTo-Json -Depth 5 -Compress)
+                }
+
+                Add-CIPPAzDataTableEntity @CustomDataMappingsTable -Entity $Entity -Force
+                Register-CIPPExtensionScheduledTasks
+
+                $Body = @{
+                    Results = @{
+                        state      = 'success'
+                        resultText = 'Mapping saved successfully.'
+                    }
+                }
+            } catch {
+                $Body = @{
+                    Results = @(
+                        @{
+                            state      = 'error'
+                            resultText = "Failed to add mapping: $($_.Exception.Message)"
+                        }
+                    )
+                }
+            }
+        }
+        'DeleteMapping' {
+            try {
+                $MappingId = $Request.Body.id
+                if (!$MappingId) {
+                    throw 'Mapping ID is missing in the request body.'
+                }
+
+                # Retrieve the mapping entity
+                $MappingEntity = Get-CIPPAzDataTableEntity @CustomDataMappingsTable -Filter "PartitionKey eq 'Mapping' and RowKey eq '$MappingId'"
+                if (!$MappingEntity) {
+                    throw "Mapping with ID '$MappingId' not found."
+                }
+
+                # Delete the mapping entity
+                Remove-AzDataTableEntity @CustomDataMappingsTable -Entity $MappingEntity
+                Register-CIPPExtensionScheduledTasks
+                $Body = @{
+                    Results = @{
+                        state      = 'success'
+                        resultText = 'Mapping deleted successfully.'
+                    }
+                }
+            } catch {
+                $Body = @{
+                    Results = @(
+                        @{
+                            state      = 'error'
+                            resultText = "Failed to delete mapping: $($_.Exception.Message)"
+                        }
+                    )
+                }
+            }
+        }
+        'GetMapping' {
+            try {
+                $MappingId = $Request.Query.id
+                if (!$MappingId) {
+                    throw 'Mapping ID is missing in the request query.'
+                }
+
+                # Retrieve the mapping entity
+                $MappingEntity = Get-CIPPAzDataTableEntity @CustomDataMappingsTable -Filter "PartitionKey eq 'Mapping' and RowKey eq '$MappingId'"
+                if (!$MappingEntity) {
+                    throw "Mapping with ID '$MappingId' not found."
+                }
+
+                $Mapping = $MappingEntity.JSON | ConvertFrom-Json
+                $Body = @{
+                    Results = $Mapping
+                }
+            } catch {
+                $Body = @{
+                    Results = @(
+                        @{
+                            state      = 'error'
+                            resultText = "Failed to retrieve mapping: $($_.Exception.Message)"
+                        }
+                    )
+                }
+            }
+        }
+
         default {
             $Body = @{
                 Results = @(

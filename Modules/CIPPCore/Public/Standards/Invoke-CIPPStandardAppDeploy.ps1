@@ -59,12 +59,18 @@ function Invoke-CIPPStandardAppDeploy {
                 Write-LogMessage -API 'Standards' -tenant $tenant -message "Failed to check app $App. Error: $ErrorMessage" -sev Error
             }
         }
-        
+
         if ($MissingApps.Count -gt 0) {
-            Write-StandardsAlert -message "The following applications are not deployed: $($MissingApps -join ', ')" -object $MissingApps -tenant $Tenant -standardName 'AppDeploy' -standardId $Settings.standardId
+            Write-StandardsAlert -message "The following applications are not deployed: $($MissingApps -join ', ')" -object (@{ 'Missing Apps' = $MissingApps -join ',' }) -tenant $Tenant -standardName 'AppDeploy' -standardId $Settings.standardId
             Write-LogMessage -API 'Standards' -tenant $tenant -message "The following applications are not deployed: $($MissingApps -join ', ')" -sev Info
         } else {
             Write-LogMessage -API 'Standards' -tenant $tenant -message 'All applications are deployed' -sev Info
         }
+    }
+
+    if ($Settings.report -eq $true) {
+        $StateIsCorrect = $MissingApps.Count -eq 0 ? $true : @{ 'Missing Apps' = $MissingApps -join ',' }
+        Set-CIPPStandardsCompareField -FieldName 'standards.AppDeploy' -FieldValue $StateIsCorrect -TenantFilter $tenant
+        Add-CIPPBPAField -FieldName 'AppDeploy' -FieldValue $StateIsCorrect -StoreAs bool -Tenant $tenant
     }
 }

@@ -28,8 +28,6 @@ function Invoke-CIPPStandardPerUserMFA {
     #>
 
     param($Tenant, $Settings)
-    ##$Rerun -Type Standard -Tenant $Tenant -Settings $Settings 'PerUserMFA'
-
 
     $GraphRequest = New-GraphGetRequest -uri "https://graph.microsoft.com/beta/users?`$top=999&`$select=userPrincipalName,displayName,accountEnabled,perUserMfaState&`$filter=userType eq 'Member' and accountEnabled eq true and displayName ne 'On-Premises Directory Synchronization Service Account'&`$count=true" -tenantid $Tenant -ComplexFilter
     $UsersWithoutMFA = $GraphRequest | Where-Object -Property perUserMfaState -NE 'enforced' | Select-Object -Property userPrincipalName, displayName, accountEnabled, perUserMfaState
@@ -54,6 +52,8 @@ function Invoke-CIPPStandardPerUserMFA {
         }
     }
     if ($Settings.report -eq $true) {
+        $State = $UsersWithoutMFA ? $UsersWithoutMFA : $true
+        Set-CIPPStandardsCompareField -FieldName 'standards.PerUserMFA' -FieldValue $State -Tenant $tenant
         Add-CIPPBPAField -FieldName 'LegacyMFAUsers' -FieldValue $UsersWithoutMFA -StoreAs json -Tenant $tenant
     }
 }
