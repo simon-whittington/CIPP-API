@@ -99,14 +99,20 @@ function Invoke-ExecApiClient {
             }
         }
         'GetAzureConfiguration' {
-            $RGName = $ENV:WEBSITE_RESOURCE_GROUP
-            $FunctionAppName = $ENV:WEBSITE_SITE_NAME
+            $Owner = $env:WEBSITE_OWNER_NAME
+            if ($Owner -match '^(?<SubscriptionId>[^+]+)\+(?<RGName>[^-]+(?:-[^-]+)*?)(?:-[^-]+webspace(?:-Linux)?)?$') {
+                $RGName = $Matches.RGName
+            } else {
+                $RGName = $env:WEBSITE_RESOURCE_GROUP
+            }
+            $FunctionAppName = $env:WEBSITE_SITE_NAME
             try {
                 $APIClients = Get-CippApiAuth -RGName $RGName -FunctionAppName $FunctionAppName
                 $Results = $ApiClients
             } catch {
                 $Results = @{
                     Enabled = 'Could not get API clients, ensure you have the appropriate rights to read the Authentication settings.'
+                    Error   = (Get-CippException -Exception $_)
                 }
             }
             $Body = @{
@@ -114,9 +120,14 @@ function Invoke-ExecApiClient {
             }
         }
         'SaveToAzure' {
-            $TenantId = $ENV:TenantId
-            $RGName = $ENV:WEBSITE_RESOURCE_GROUP
-            $FunctionAppName = $ENV:WEBSITE_SITE_NAME
+            $TenantId = $env:TenantID
+            $Owner = $env:WEBSITE_OWNER_NAME
+            if ($Owner -match '^(?<SubscriptionId>[^+]+)\+(?<RGName>[^-]+(?:-[^-]+)*?)(?:-[^-]+webspace(?:-Linux)?)?$') {
+                $RGName = $Matches.RGName
+            } else {
+                $RGName = $env:WEBSITE_RESOURCE_GROUP
+            }
+            $FunctionAppName = $env:WEBSITE_SITE_NAME
             $AllClients = Get-CIPPAzDataTableEntity @Table -Filter 'Enabled eq true' | Where-Object { ![string]::IsNullOrEmpty($_.RowKey) }
             $ClientIds = $AllClients.RowKey
             try {
@@ -124,7 +135,10 @@ function Invoke-ExecApiClient {
                 $Body = @{ Results = 'API clients saved to Azure' }
                 Write-LogMessage -headers $Request.Headers -API 'ExecApiClient' -message 'Saved API clients to Azure' -Sev 'Info'
             } catch {
-                $Body = @{ Results = 'Failed to save allowed API clients to Azure, ensure your function app has the appropriate rights to make changes to the Authentication settings.' }
+                $Body = @{
+                    Results = 'Failed to save allowed API clients to Azure, ensure your function app has the appropriate rights to make changes to the Authentication settings.'
+                    Error   = (Get-CippException -Exception $_)
+                }
                 Write-Information (Get-CippException -Exception $_ | ConvertTo-Json)
             }
         }
