@@ -98,18 +98,19 @@ function Test-CIPPAuditLogRules {
                 $HasLocationData = $false
                 if (![string]::IsNullOrEmpty($Data.clientip) -and $Data.clientip -notmatch '[X]+') {
                     # Ignore IP addresses that have been redacted
-                    if ($Data.clientip -match '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+$') {
-                        $Data.clientip = $Data.clientip -replace ':\d+$', '' # Remove the port number if present
-                    }
+
+                    $IPRegex = '^(?<IP>(?:\d{1,3}(?:\.\d{1,3}){3}|\[[0-9a-fA-F:]+\]|[0-9a-fA-F:]+))(?::\d+)?$'
+                    $Data.clientip = $Data.clientip -replace $IPRegex, '$1' -replace '[\[\]]', ''
+
                     # Check if IP is on trusted IP list
-                    $TrustedIP = Get-CIPPAzDataTableEntity @TrustedIPTable -Filter "((PartitionKey eq '$TenantFilter') or (PartitionKey eq 'AllTenants')) and RowKey eq '$($Data.clientip)'  and state eq 'Trusted'"
+                    $TrustedIP = Get-CIPPAzDataTableEntity @TrustedIPTable -Filter "((PartitionKey eq '$TenantFilter') or (PartitionKey eq 'AllTenants')) and RowKey eq '$($Data.clientip)' and state eq 'Trusted'"
                     if ($TrustedIP) {
                         #write-warning "IP $($Data.clientip) is trusted"
                         $Trusted = $true
                     }
                     if (!$Trusted) {
                         $CacheLookupStartTime = Get-Date
-                        $Location = Get-CIPPAzDataTableEntity @LocationTable -Filter "RowKey eq '$($Data.clientIp)'" | Select-Object -Last 1 -ExcludeProperty Tenant
+                        $Location = Get-AzDataTableEntity @LocationTable -Filter "PartitionKey eq 'ip' and RowKey eq '$($Data.clientIp)'" | Select-Object -ExcludeProperty Tenant
                         $CacheLookupEndTime = Get-Date
                         $CacheLookupSeconds = ($CacheLookupEndTime - $CacheLookupStartTime).TotalSeconds
                         Write-Warning "Cache lookup for IP $($Data.clientip) took $CacheLookupSeconds seconds"
