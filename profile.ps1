@@ -1,16 +1,4 @@
-# Azure Functions profile.ps1
-#
-# This profile.ps1 will get executed every "cold start" of your Function App.
-# "cold start" occurs when:
-#
-# * A Function App starts up for the very first time
-# * A Function App starts up after being de-allocated due to inactivity
-#
-# You can define helper functions, run commands, or specify environment variables
-# NOTE: any variables defined that are not environment variables will get reset after the first execution
-
-# Authenticate with Azure PowerShell using MSI.
-# Remove this if you are not planning on using MSI or Azure PowerShell.
+Write-Information "CIPP-API Start - PS Version: $($PSVersionTable.PSVersion)"
 
 # Import modules
 @('CIPPCore', 'CippExtensions', 'Az.KeyVault', 'Az.Accounts', 'AzBobbyTables') | ForEach-Object {
@@ -55,11 +43,13 @@ if (!$LastStartup -or $CurrentVersion -ne $LastStartup.Version) {
     Write-Information "Version has changed from $($LastStartup.Version ?? 'None') to $CurrentVersion"
     if ($LastStartup) {
         $LastStartup.Version = $CurrentVersion
+        $LastStartup | Add-Member -MemberType NoteProperty -Name 'PSVersion' -Value $PSVersionTable.PSVersion.ToString()
     } else {
         $LastStartup = [PSCustomObject]@{
             PartitionKey = 'Version'
             RowKey       = $env:WEBSITE_SITE_NAME
             Version      = $CurrentVersion
+            PSVersion    = $PSVersionTable.PSVersion.ToString()
         }
     }
     Update-AzDataTableEntity @Table -Entity $LastStartup -Force -ErrorAction SilentlyContinue
