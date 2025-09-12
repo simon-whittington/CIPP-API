@@ -54,6 +54,9 @@ function Get-GraphRequestList {
     .PARAMETER Caller
     Name of the calling function
 
+    .PARAMETER UseBatchExpand
+    Perform a batch lookup using the $expand query parameter to avoid 20 item max
+
     #>
     [CmdletBinding()]
     param(
@@ -76,7 +79,8 @@ function Get-GraphRequestList {
         [switch]$ReverseTenantLookup,
         [string]$ReverseTenantLookupProperty = 'tenantId',
         [boolean]$AsApp = $false,
-        [string]$Caller = 'Get-GraphRequestList'
+        [string]$Caller = 'Get-GraphRequestList',
+        [switch]$UseBatchExpand
     )
 
     $SingleTenantThreshold = 8000
@@ -100,7 +104,21 @@ function Get-GraphRequestList {
             $Item.Value = $Item.Value.ToString().ToLower()
         }
         if ($Item.Value) {
-            $ParamCollection.Add($Item.Key, $Item.Value)
+            if ($Item.Key -eq '$select' -or $Item.Key -eq 'select') {
+                $Columns = $Item.Value -split ','
+                $ActualCols = foreach ($Col in $Columns) {
+                    $Col -split '\.' | Select-Object -First 1
+                }
+                $Value = ($ActualCols | Sort-Object -Unique) -join ','
+            } else {
+                $Value = $Item.Value
+            }
+
+            if ($UseBatchExpand.IsPresent -and ($Item.Key -eq '$expand' -or $Item.Key -eq 'expand')) {
+                $BatchExpandQuery = $Item.Value
+            } else {
+                $ParamCollection.Add($Item.Key, $Value)
+            }
         }
     }
     $GraphQuery.Query = $ParamCollection.ToString()
@@ -134,7 +152,16 @@ function Get-GraphRequestList {
             $GraphQuery = [System.UriBuilder]('https://graph.microsoft.com/{0}/{1}' -f $Version, $Endpoint)
             $ParamCollection = [System.Web.HttpUtility]::ParseQueryString([String]::Empty)
             foreach ($Item in ($Parameters.GetEnumerator() | Sort-Object -CaseSensitive -Property Key)) {
-                $Value = Get-CIPPTextReplacement -TenantFilter $TenantFilter -Text $Item.Value
+                if ($Item.Key -eq '$select' -or $Item.Key -eq 'select') {
+                    $Columns = $Item.Value -split ','
+                    $ActualCols = foreach ($Col in $Columns) {
+                        $Col -split '\.' | Select-Object -First 1
+                    }
+                    $Value = ($ActualCols | Sort-Object -Unique) -join ','
+                } else {
+                    $Value = $Item.Value
+                }
+                $Value = Get-CIPPTextReplacement -TenantFilter $TenantFilter -Text $Value
                 $ParamCollection.Add($Item.Key, $Value)
             }
             $GraphQuery.Query = $ParamCollection.ToString()
@@ -157,7 +184,7 @@ function Get-GraphRequestList {
             $Type = 'Queue'
             Write-Information "Cached: $(($Rows | Measure-Object).Count) rows (Type: $($Type))"
             $QueueReference = '{0}-{1}' -f $TenantFilter, $PartitionKey
-            $RunningQueue = Invoke-ListCippQueue | Where-Object { $_.Reference -eq $QueueReference -and $_.Status -ne 'Completed' -and $_.Status -ne 'Failed' }
+            $RunningQueue = Invoke-ListCippQueue -Reference $QueueReference | Where-Object { $_.Status -ne 'Completed' -and $_.Status -ne 'Failed' }
         } elseif (!$SkipCache.IsPresent -and !$ClearCache.IsPresent -and !$CountOnly.IsPresent) {
             if ($TenantFilter -eq 'AllTenants' -or $Count -gt $SingleTenantThreshold) {
                 $Table = Get-CIPPTable -TableName $TableName
@@ -171,7 +198,7 @@ function Get-GraphRequestList {
                 $Type = 'Cache'
                 Write-Information "Cached: $(($Rows | Measure-Object).Count) rows (Type: $($Type))"
                 $QueueReference = '{0}-{1}' -f $TenantFilter, $PartitionKey
-                $RunningQueue = Invoke-ListCippQueue | Where-Object { $_.Reference -eq $QueueReference -and $_.Status -notmatch 'Completed' -and $_.Status -notmatch 'Failed' }
+                $RunningQueue = Invoke-ListCippQueue -Reference $QueueReference | Where-Object { $_.Status -notmatch 'Completed' -and $_.Status -notmatch 'Failed' }
             }
         }
     } catch {
@@ -312,6 +339,50 @@ function Get-GraphRequestList {
 
                         $GraphRequestResults = New-GraphGetRequest @GraphRequest -Caller $Caller -ErrorAction Stop
                         $GraphRequestResults = $GraphRequestResults | Select-Object *, @{n = 'Tenant'; e = { $TenantFilter } }, @{n = 'CippStatus'; e = { 'Good' } }
+
+                        if ($UseBatchExpand.IsPresent -and ![string]::IsNullOrEmpty($BatchExpandQuery)) {
+                            if ($BatchExpandQuery -match '' -and ![string]::IsNullOrEmpty($GraphRequestResults.id)) {
+                                # Convert $expand format to actual batch query e.g. members($select=id,displayName) to members?$select=id,displayName
+                                $BatchExpandQuery = $BatchExpandQuery -replace '\(\$?([^=]+)=([^)]+)\)', '?$$$1=$2' -replace ';', '&'
+
+                                # Extract property name from expand
+                                $Property = $BatchExpandQuery -replace '\?.*$', '' -replace '^.*\/', ''
+                                Write-Information "Performing batch expansion for property '$Property'..."
+
+                                if ($Property -eq 'assignedLicenses') {
+                                    $LicenseDetails = Get-CIPPLicenseOverview -TenantFilter $TenantFilter
+                                    $GraphRequestResults = foreach ($GraphRequestResult in $GraphRequestResults) {
+                                        $NewLicenses = [system.collections.generic.list[string]]::new()
+                                        foreach ($License in $GraphRequestResult.assignedLicenses) {
+                                            $LicenseInfo = $LicenseDetails | Where-Object { $_.skuId -eq $License.skuId } | Select-Object -First 1
+                                            if ($LicenseInfo) {
+                                                $NewLicenses.Add($LicenseInfo.License)
+                                            }
+                                        }
+                                        $GraphRequestResult | Add-Member -MemberType NoteProperty -Name $Property -Value @($NewLicenses) -Force
+                                        $GraphRequestResult
+                                    }
+                                } else {
+
+                                    $Uri = "$Endpoint/{0}/$BatchExpandQuery"
+
+                                    $Requests = foreach ($Result in $GraphRequestResults) {
+                                        @{
+                                            id     = $Result.id
+                                            url    = $Uri -f $Result.id
+                                            method = 'GET'
+                                        }
+                                    }
+                                    $BatchResults = New-GraphBulkRequest -Requests @($Requests) -tenantid $TenantFilter -NoAuthCheck $NoAuthCheck.IsPresent -asapp $AsApp
+
+                                    $GraphRequestResults = foreach ($Result in $GraphRequestResults) {
+                                        $PropValue = $BatchResults | Where-Object { $_.id -eq $Result.id } | Select-Object -ExpandProperty body
+                                        $Result | Add-Member -MemberType NoteProperty -Name $Property -Value ($PropValue.value ?? $PropValue)
+                                        $Result
+                                    }
+                                }
+                            }
+                        }
 
                         if ($ReverseTenantLookup -and $GraphRequestResults) {
                             $ReverseLookupRequests = $GraphRequestResults.$ReverseTenantLookupProperty | Sort-Object -Unique | ForEach-Object {
